@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
-from app.routers import books
+from app.middleware.auth_rbac import JWTAuthMiddleware, RBACMiddleware
+from app.routers import auth, books
 
 
 @asynccontextmanager
@@ -15,6 +16,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Book Management System", lifespan=lifespan)
 
+app.add_middleware(RBACMiddleware)
+app.add_middleware(JWTAuthMiddleware)
+# added last so it's outermost and 401/403 responses still get CORS headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,6 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(books.router)
 
 

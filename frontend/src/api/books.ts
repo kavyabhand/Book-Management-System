@@ -1,12 +1,46 @@
-import { API_URL } from "../config";
-import type { Book } from "../types/book";
+import { clearSession } from "../storage/session";
+import type { Book, BookPage } from "../types/book";
+import { apiFetch } from "./client";
 
-export async function fetchBooks(): Promise<Book[]> {
-  const res = await fetch(`${API_URL}/books`);
+async function readBody<T>(res: Response, fallback: string): Promise<T> {
+  if (res.status === 401) {
+    clearSession();
+    throw new Error("session expired");
+  }
   if (!res.ok) {
-    throw new Error("failed to load books");
+    let detail = fallback;
+    try {
+      const data = await res.json();
+      if (typeof data?.detail === "string") {
+        detail = data.detail;
+      }
+    } catch {
+      detail = fallback;
+    }
+    throw new Error(detail);
+  }
+  if (res.status === 204) {
+    return undefined as T;
   }
   return res.json();
+}
+
+export async function fetchBookPage(params: {
+  limit?: number;
+  cursor?: string | null;
+  q?: string;
+}): Promise<BookPage> {
+  const search = new URLSearchParams();
+  search.set("limit", String(params.limit ?? 10));
+  if (params.cursor) {
+    search.set("cursor", params.cursor);
+  }
+  if (params.q?.trim()) {
+    search.set("q", params.q.trim());
+  }
+
+  const res = await apiFetch(`/books?${search.toString()}`);
+  return readBody<BookPage>(res, "failed to load books");
 }
 
 export async function createBook(payload: {
@@ -14,13 +48,25 @@ export async function createBook(payload: {
   author: string;
   isbn?: string | null;
 }): Promise<Book> {
-  const res = await fetch(`${API_URL}/books`, {
+  const res = await apiFetch("/books", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) {
-    throw new Error("failed to add book");
-  }
-  return res.json();
+  return readBody<Book>(res, "failed to add book");
+}
+
+export async function updateBook(
+  id: string,
+  payload: { title: string; author: string; isbn?: string | null }
+): Promise<Book> {
+  const res = await apiFetch(`/books/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  return readBody<Book>(res, "failed to update book");
+}
+
+export async function deleteBook(id: string): Promise<void> {
+  const res = await apiFetch(`/books/${id}`, { method: "DELETE" });
+  await readBody<void>(res, "failed to delete book");
 }
