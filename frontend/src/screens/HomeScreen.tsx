@@ -3,9 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
-  Platform,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -19,19 +19,26 @@ import {
   updateBook,
 } from "../api/books";
 import BookRow from "../components/BookRow";
+import TopBar, { type LibraryTab } from "../components/TopBar";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
-import { clearSession, getRole, getUsername } from "../storage/session";
+import { getRole } from "../storage/session";
 import { colors, fieldReset, sans, serif } from "../theme";
-import type { Book } from "../types/book";
+import { shelves, type Book, type Shelf, type SortKey } from "../types/book";
 
 type Props = {
   onLogout: () => void;
+  onOpenBook: (id: string) => void;
+  onTab: (tab: LibraryTab) => void;
 };
 
-export default function HomeScreen({ onLogout }: Props) {
-  const role = getRole();
-  const username = getUsername();
-  const canEdit = role === "admin";
+const sorts: { id: SortKey; label: string }[] = [
+  { id: "newest", label: "newest" },
+  { id: "title", label: "title" },
+  { id: "author", label: "author" },
+];
+
+export default function HomeScreen({ onLogout, onOpenBook, onTab }: Props) {
+  const canEdit = getRole() === "admin";
   const listRef = useRef<FlatList<Book>>(null);
 
   const [books, setBooks] = useState<Book[]>([]);
@@ -42,10 +49,16 @@ export default function HomeScreen({ onLogout }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search, 400);
+  const [shelf, setShelf] = useState<Shelf | null>(null);
+  const [sort, setSort] = useState<SortKey>("newest");
 
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
   const [isbn, setIsbn] = useState("");
+  const [genre, setGenre] = useState<Shelf>("fiction");
+  const [year, setYear] = useState("");
+  const [copies, setCopies] = useState("1");
+  const [description, setDescription] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deskOpen, setDeskOpen] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -67,13 +80,13 @@ export default function HomeScreen({ onLogout }: Props) {
   const loadFirstPage = useCallback(async (query: string) => {
     const id = ++requestId.current;
     setError(null);
-    const page = await fetchBookPage({ q: query, limit: 8 });
+    const page = await fetchBookPage({ q: query, limit: 8, genre: shelf, sort });
     if (id !== requestId.current) {
       return;
     }
     setBooks(page.items);
     setNextCursor(page.next_cursor);
-  }, []);
+  }, [shelf, sort]);
 
   useEffect(() => {
     let active = true;
@@ -115,6 +128,8 @@ export default function HomeScreen({ onLogout }: Props) {
         q: debouncedSearch,
         cursor: nextCursor,
         limit: 8,
+        genre: shelf,
+        sort,
       });
       setBooks((prev) => [...prev, ...page.items]);
       setNextCursor(page.next_cursor);
@@ -131,6 +146,10 @@ export default function HomeScreen({ onLogout }: Props) {
     setTitle("");
     setAuthor("");
     setIsbn("");
+    setGenre("fiction");
+    setYear("");
+    setCopies("1");
+    setDescription("");
   }
 
   function startEdit(book: Book) {
@@ -140,14 +159,28 @@ export default function HomeScreen({ onLogout }: Props) {
     setTitle(book.title);
     setAuthor(book.author);
     setIsbn(book.isbn ?? "");
+    setGenre((shelves as readonly string[]).includes(book.genre) ? (book.genre as Shelf) : "fiction");
+    setYear(book.year ? String(book.year) : "");
+    setCopies(String(book.copies || 1));
+    setDescription(book.description ?? "");
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }
 
   async function handleSave() {
     const trimmedTitle = title.trim();
     const trimmedAuthor = author.trim();
+    const copyCount = Number(copies);
+    const yearNumber = year.trim() ? Number(year) : null;
     if (!trimmedTitle || !trimmedAuthor) {
       setError("title and author are required");
+      return;
+    }
+    if (!Number.isInteger(copyCount) || copyCount < 1) {
+      setError("copies has to be at least 1");
+      return;
+    }
+    if (yearNumber !== null && (!Number.isInteger(yearNumber) || yearNumber < 1000)) {
+      setError("year looks wrong");
       return;
     }
 
@@ -158,6 +191,10 @@ export default function HomeScreen({ onLogout }: Props) {
         title: trimmedTitle,
         author: trimmedAuthor,
         isbn: isbn.trim() || null,
+        genre,
+        description: description.trim() || null,
+        year: yearNumber,
+        copies: copyCount,
       };
       if (editingId) {
         await updateBook(editingId, payload);
@@ -185,11 +222,6 @@ export default function HomeScreen({ onLogout }: Props) {
     } catch (err) {
       fail(err, "delete failed");
     }
-  }
-
-  function handleLogout() {
-    clearSession();
-    onLogout();
   }
 
   const searching = search.trim() !== debouncedSearch.trim();
@@ -229,6 +261,45 @@ export default function HomeScreen({ onLogout }: Props) {
             onChangeText={setIsbn}
             autoCapitalize="none"
           />
+          <Text style={styles.label}>shelf</Text>
+          <View style={styles.chipRow}>
+            {shelves.map((item) => (
+              <Pressable
+                key={item}
+                style={[styles.chip, genre === item && styles.chipOn]}
+                onPress={() => setGenre(item)}
+              >
+                <Text style={[styles.chipText, genre === item && styles.chipTextOn]}>{item}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={styles.label}>year</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="optional"
+            placeholderTextColor={colors.muted}
+            value={year}
+            onChangeText={setYear}
+            keyboardType="number-pad"
+          />
+          <Text style={styles.label}>copies</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="1"
+            placeholderTextColor={colors.muted}
+            value={copies}
+            onChangeText={setCopies}
+            keyboardType="number-pad"
+          />
+          <Text style={styles.label}>note</Text>
+          <TextInput
+            style={[styles.input, styles.noteInput]}
+            placeholder="a line about the book"
+            placeholderTextColor={colors.muted}
+            value={description}
+            onChangeText={setDescription}
+            multiline
+          />
           <View style={styles.formActions}>
             <Pressable style={styles.ghost} onPress={resetForm}>
               <Text style={styles.ghostText}>cancel</Text>
@@ -248,8 +319,7 @@ export default function HomeScreen({ onLogout }: Props) {
         <View style={styles.readerNote}>
           <Text style={styles.readerTitle}>browsing as a reader</Text>
           <Text style={styles.readerBody}>
-            you can search the shelf. adding and editing titles stays with the
-            librarian.
+            you can search, borrow, and save. adding titles stays with the librarian.
           </Text>
         </View>
       ) : null}
@@ -259,6 +329,35 @@ export default function HomeScreen({ onLogout }: Props) {
           <Text style={styles.addLinkText}>add a title</Text>
         </Pressable>
       ) : null}
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.shelves}
+      >
+        <Pressable
+          style={[styles.chip, shelf === null && styles.chipOn]}
+          onPress={() => setShelf(null)}
+        >
+          <Text style={[styles.chipText, shelf === null && styles.chipTextOn]}>all</Text>
+        </Pressable>
+        {shelves.map((item) => (
+          <Pressable
+            key={item}
+            style={[styles.chip, shelf === item && styles.chipOn]}
+            onPress={() => setShelf(item)}
+          >
+            <Text style={[styles.chipText, shelf === item && styles.chipTextOn]}>{item}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      <View style={styles.sortRow}>
+        {sorts.map((item) => (
+          <Pressable key={item.id} onPress={() => setSort(item.id)} hitSlop={6}>
+            <Text style={[styles.sortText, sort === item.id && styles.sortOn]}>{item.label}</Text>
+          </Pressable>
+        ))}
+      </View>
 
       <View style={styles.sectionRow}>
         <Text style={styles.section}>
@@ -272,25 +371,9 @@ export default function HomeScreen({ onLogout }: Props) {
 
   return (
     <View style={styles.page}>
+      <TopBar tab="catalog" onTab={onTab} onLogout={onLogout} />
       <View style={styles.column}>
         <View style={styles.header}>
-          <View style={styles.headerTop}>
-            <View style={styles.identity}>
-              <Text style={styles.wordmark}>bookstack</Text>
-              <Text style={styles.hello}>{username || "signed in"}</Text>
-            </View>
-            <View style={styles.headerActions}>
-              <View style={[styles.pill, canEdit ? styles.pillAdmin : styles.pillReader]}>
-                <Text style={[styles.pillText, canEdit && styles.pillTextAdmin]}>
-                  {canEdit ? "librarian" : "reader"}
-                </Text>
-              </View>
-              <Pressable onPress={handleLogout} hitSlop={8}>
-                <Text style={styles.signOut}>sign out</Text>
-              </Pressable>
-            </View>
-          </View>
-
           <View style={[styles.search, searchFocused && styles.searchFocused]}>
             <TextInput
               style={styles.searchInput}
@@ -361,6 +444,7 @@ export default function HomeScreen({ onLogout }: Props) {
                 book={item}
                 canEdit={canEdit}
                 confirming={pendingDeleteId === item.id}
+                onOpen={(book) => onOpenBook(book.id)}
                 onEdit={startEdit}
                 onAskDelete={(book) => setPendingDeleteId(book.id)}
                 onConfirmDelete={handleDelete}
@@ -385,71 +469,18 @@ const styles = StyleSheet.create({
     flex: 1,
     width: "100%",
     maxWidth: 760,
+    backgroundColor: colors.paper,
   },
   header: {
-    paddingTop: Platform.OS === "web" ? 28 : 56,
-    paddingHorizontal: 22,
     paddingBottom: 8,
-  },
-  headerTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 12,
-  },
-  identity: {
-    flexShrink: 1,
-  },
-  wordmark: {
-    ...serif,
-    fontSize: 34,
-    lineHeight: 38,
-    color: colors.ink,
-  },
-  hello: {
-    ...sans,
-    marginTop: 2,
-    fontSize: 14,
-    color: colors.muted,
-  },
-  headerActions: {
-    alignItems: "flex-end",
-    gap: 8,
-    paddingTop: 6,
-  },
-  pill: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  pillAdmin: {
-    backgroundColor: colors.goldSoft,
-  },
-  pillReader: {
-    backgroundColor: colors.sage,
-  },
-  pillText: {
-    ...sans,
-    fontSize: 12,
-    fontWeight: "600",
-    color: colors.forest,
-    letterSpacing: 0.3,
-  },
-  pillTextAdmin: {
-    color: "#6E5420",
-  },
-  signOut: {
-    ...sans,
-    fontSize: 13,
-    color: colors.muted,
-    fontWeight: "600",
   },
   search: {
     marginTop: 18,
+    marginHorizontal: 22,
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: colors.paper,
-    borderRadius: 14,
+    borderRadius: 0,
     borderWidth: 1,
     borderColor: colors.line,
     paddingHorizontal: 14,
@@ -476,9 +507,58 @@ const styles = StyleSheet.create({
   searching: {
     ...sans,
     marginTop: 6,
-    marginLeft: 4,
+    marginLeft: 26,
     fontSize: 12,
     color: colors.muted,
+  },
+  shelves: {
+    gap: 8,
+    paddingBottom: 8,
+  },
+  sortRow: {
+    flexDirection: "row",
+    gap: 14,
+    marginBottom: 12,
+  },
+  sortText: {
+    ...sans,
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  sortOn: {
+    color: colors.ink,
+  },
+  chipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 12,
+  },
+  chip: {
+    borderRadius: 0,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.paper,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  chipOn: {
+    backgroundColor: colors.forest,
+    borderColor: colors.forest,
+  },
+  chipText: {
+    ...sans,
+    fontSize: 13,
+    color: colors.muted,
+    fontWeight: "600",
+  },
+  chipTextOn: {
+    color: colors.cream,
+  },
+  noteInput: {
+    minHeight: 72,
+    textAlignVertical: "top",
   },
   listContent: {
     paddingHorizontal: 22,
@@ -489,7 +569,7 @@ const styles = StyleSheet.create({
   },
   desk: {
     backgroundColor: colors.paper,
-    borderRadius: 18,
+    borderRadius: 0,
     borderWidth: 1,
     borderColor: colors.line,
     padding: 18,
@@ -524,7 +604,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: "#FBF9F4",
-    borderRadius: 10,
+    borderRadius: 0,
     paddingHorizontal: 12,
     paddingVertical: 11,
     fontSize: 15,
@@ -537,7 +617,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   ghost: {
-    borderRadius: 12,
+    borderRadius: 0,
     borderWidth: 1,
     borderColor: colors.line,
     paddingHorizontal: 16,
@@ -552,7 +632,7 @@ const styles = StyleSheet.create({
   save: {
     flex: 1,
     backgroundColor: colors.forest,
-    borderRadius: 12,
+    borderRadius: 0,
     minHeight: 46,
     alignItems: "center",
     justifyContent: "center",
@@ -571,7 +651,7 @@ const styles = StyleSheet.create({
   },
   addLink: {
     backgroundColor: colors.forest,
-    borderRadius: 14,
+    borderRadius: 0,
     minHeight: 48,
     alignItems: "center",
     justifyContent: "center",
@@ -585,7 +665,9 @@ const styles = StyleSheet.create({
   },
   readerNote: {
     backgroundColor: colors.sage,
-    borderRadius: 16,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.gold,
+    borderRadius: 0,
     paddingHorizontal: 16,
     paddingVertical: 14,
     marginBottom: 22,
@@ -622,7 +704,7 @@ const styles = StyleSheet.create({
     ...sans,
     color: colors.danger,
     backgroundColor: colors.dangerSoft,
-    borderRadius: 10,
+    borderRadius: 0,
     overflow: "hidden",
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -661,7 +743,7 @@ const styles = StyleSheet.create({
   more: {
     borderWidth: 1,
     borderColor: colors.forest,
-    borderRadius: 999,
+    borderRadius: 0,
     paddingHorizontal: 18,
     paddingVertical: 10,
   },

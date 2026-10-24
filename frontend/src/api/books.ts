@@ -1,53 +1,36 @@
-import { clearSession } from "../storage/session";
-import type { Book, BookPage } from "../types/book";
-import { apiFetch } from "./client";
-
-async function readBody<T>(res: Response, fallback: string): Promise<T> {
-  if (res.status === 401) {
-    clearSession();
-    throw new Error("session expired");
-  }
-  if (!res.ok) {
-    let detail = fallback;
-    try {
-      const data = await res.json();
-      if (typeof data?.detail === "string") {
-        detail = data.detail;
-      }
-    } catch {
-      detail = fallback;
-    }
-    throw new Error(detail);
-  }
-  if (res.status === 204) {
-    return undefined as T;
-  }
-  return res.json();
-}
+import type { Book, BookInput, BookPage, SortKey } from "../types/book";
+import { apiFetch, readBody } from "./client";
 
 export async function fetchBookPage(params: {
   limit?: number;
   cursor?: string | null;
   q?: string;
+  genre?: string | null;
+  sort?: SortKey;
 }): Promise<BookPage> {
   const search = new URLSearchParams();
   search.set("limit", String(params.limit ?? 10));
+  search.set("sort", params.sort ?? "newest");
   if (params.cursor) {
     search.set("cursor", params.cursor);
   }
   if (params.q?.trim()) {
     search.set("q", params.q.trim());
   }
+  if (params.genre) {
+    search.set("genre", params.genre);
+  }
 
   const res = await apiFetch(`/books?${search.toString()}`);
   return readBody<BookPage>(res, "failed to load books");
 }
 
-export async function createBook(payload: {
-  title: string;
-  author: string;
-  isbn?: string | null;
-}): Promise<Book> {
+export async function fetchBook(id: string): Promise<Book> {
+  const res = await apiFetch(`/books/${id}`);
+  return readBody<Book>(res, "book not found");
+}
+
+export async function createBook(payload: BookInput): Promise<Book> {
   const res = await apiFetch("/books", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -55,10 +38,7 @@ export async function createBook(payload: {
   return readBody<Book>(res, "failed to add book");
 }
 
-export async function updateBook(
-  id: string,
-  payload: { title: string; author: string; isbn?: string | null }
-): Promise<Book> {
+export async function updateBook(id: string, payload: BookInput): Promise<Book> {
   const res = await apiFetch(`/books/${id}`, {
     method: "PUT",
     body: JSON.stringify(payload),

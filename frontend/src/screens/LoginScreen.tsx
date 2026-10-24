@@ -23,8 +23,8 @@ type Props = {
 type Mode = "login" | "register";
 
 const ACCOUNTS = [
-  { role: "librarian", username: "admin", password: "admin123", note: "can add and edit books" },
-  { role: "reader", username: "reader", password: "reader123", note: "can browse and search" },
+  { role: "librarian", username: "admin", password: "admin123", note: "keeps the shelves, sees what is out" },
+  { role: "reader", username: "reader", password: "reader123", note: "borrows, returns, and saves" },
 ];
 
 export default function LoginScreen({ onSuccess }: Props) {
@@ -102,7 +102,7 @@ export default function LoginScreen({ onSuccess }: Props) {
                 <View style={styles.rule} />
                 <Text style={styles.lede}>
                   one catalog, two kinds of account. the librarian keeps the
-                  shelf. readers search it.
+                  shelf. readers take a book home.
                 </Text>
               </View>
 
@@ -296,7 +296,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(243, 238, 228, 0.16)",
     backgroundColor: "rgba(243, 238, 228, 0.06)",
-    borderRadius: 14,
+    borderRadius: 0,
     paddingHorizontal: 14,
     paddingVertical: 12,
   },
@@ -356,7 +356,7 @@ const styles = StyleSheet.create({
   switch: {
     flexDirection: "row",
     backgroundColor: colors.cream,
-    borderRadius: 999,
+    borderRadius: 0,
     padding: 4,
     alignSelf: "flex-start",
     marginBottom: 22,
@@ -364,7 +364,7 @@ const styles = StyleSheet.create({
   switchItem: {
     paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 999,
+    borderRadius: 0,
   },
   switchOn: {
     backgroundColor: colors.forest,
@@ -417,7 +417,7 @@ const styles = StyleSheet.create({
     ...sans,
     color: colors.danger,
     backgroundColor: colors.dangerSoft,
-    borderRadius: 10,
+    borderRadius: 0,
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginBottom: 12,
@@ -426,7 +426,7 @@ const styles = StyleSheet.create({
   },
   button: {
     backgroundColor: colors.forest,
-    borderRadius: 12,
+    borderRadius: 0,
     minHeight: 48,
     alignItems: "center",
     justifyContent: "center",

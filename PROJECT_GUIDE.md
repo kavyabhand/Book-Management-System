@@ -12,8 +12,8 @@ Nothing here is deployed. There is no EC2, no RDS instance, and no GitHub Action
 
 A small library catalog with two kinds of account.
 
-- A **librarian** (database role `admin`) can list, search, add, edit, and delete books.
-- A **reader** (database role `user`) can list and search. Create, update, and delete are rejected.
+- A **librarian** (database role `admin`) can list, search, add, edit, and delete books, and can see every loan.
+- A **reader** (database role `user`) can list, search, borrow, return their own copies, and keep a reading list. Create, update, and delete are rejected.
 
 The app name on screen is **bookstack**. The Expo app name is **Book Management System**.
 
@@ -21,11 +21,15 @@ The app name on screen is **bookstack**. The Expo app name is **Book Management 
 
 | Feature | Where it is implemented |
 |---|---|
-| Full CRUD for books | `backend/app/routers/books.py`. The UI uses all of it except “get one book by id”. |
-| RBAC in middleware | `backend/app/middleware/auth_rbac.py`, class `RBACMiddleware`. |
+| Full CRUD for books | `backend/app/routers/books.py`. The catalog uses list, create, update, and delete. The book page uses get-one. |
+| RBAC in middleware | `backend/app/middleware/auth_rbac.py`, class `RBACMiddleware`. Book writes only. Loan “see everyone” is checked inside `loans.py`. |
 | JWT access token + refresh token | Access token: `backend/app/security.py`. Refresh token: `backend/app/routers/auth.py` plus the `refresh_tokens` table. |
-| Cursor pagination | `list_books` in `backend/app/routers/books.py`. The UI asks for 8 books at a time and shows a “show more” button. |
+| Cursor pagination | `list_books` in `backend/app/routers/books.py`. The UI asks for 8 books at a time and shows a “show more” button. The cursor includes the current sort. |
 | Debounced search | `frontend/src/hooks/useDebouncedValue.ts`, used in `HomeScreen.tsx` with a 400 ms delay. |
+| Shelves | `genre` on `books`. Filter chips on the catalog. Allowed values live in `SHELVES` in `schemas.py`: fiction, fantasy, history, memoir, science. |
+| Copies, borrow, return, due date | `loans` table and `backend/app/routers/loans.py`. `backend/app/lending.py` sets the due date 14 days out and marks a loan late. |
+| Reading list | `saved_books` table and `backend/app/routers/saved.py`. Saving does not take a copy. |
+| Sort | Query param `sort` is `newest`, `title`, or `author`. |
 
 ### Stack
 
@@ -84,13 +88,16 @@ bms/
 │       ├── models.py          users, refresh_tokens, books
 │       ├── schemas.py         request and response shapes
 │       ├── security.py        bcrypt and JWT
+│       ├── lending.py         due date, late check, book extras for the response
 │       ├── middleware/
 │       │   ├── __init__.py    empty
 │       │   └── auth_rbac.py   JWT check and role check
 │       └── routers/
 │           ├── __init__.py    empty
 │           ├── auth.py        register, login, refresh
-│           └── books.py       CRUD and cursor pages
+│           ├── books.py       CRUD, shelves, sort, cursor pages
+│           ├── loans.py       borrow, return, my loans, all loans
+│           └── saved.py       reading list
 └── frontend/
     ├── .gitignore
     ├── LICENSE                Expo's MIT license from the template
@@ -99,7 +106,7 @@ bms/
     ├── tsconfig.json
     ├── app.json               Expo name, icons, orientation
     ├── index.ts               registers the root component
-    ├── App.tsx                login vs home
+    ├── App.tsx                login, then catalog / book / loans / saved
     ├── assets/                default Expo icons and favicon
     └── src/
         ├── config.ts          API base URL
@@ -107,19 +114,27 @@ bms/
         ├── api/
         │   ├── auth.ts        login and register
         │   ├── books.ts       book HTTP calls
-        │   └── client.ts      bearer token and refresh retry
+        │   ├── loans.ts       borrow, return, loan lists
+        │   ├── saved.ts       reading list
+        │   └── client.ts      bearer token, refresh retry, readBody
         ├── storage/
         │   └── session.ts     sessionStorage on web, memory elsewhere
         ├── types/
-        │   └── book.ts        Book and BookPage types
+        │   ├── book.ts        Book, shelves, sort
+        │   └── loan.ts        Loan
+        ├── format.ts          short dates on cards
         ├── hooks/
         │   └── useDebouncedValue.ts
         ├── components/
         │   ├── BookCover.tsx
-        │   └── BookRow.tsx
+        │   ├── BookRow.tsx
+        │   └── TopBar.tsx     dark library band, role, tabs
         └── screens/
             ├── LoginScreen.tsx
-            └── HomeScreen.tsx
+            ├── HomeScreen.tsx
+            ├── BookScreen.tsx
+            ├── LoansScreen.tsx
+            └── SavedScreen.tsx
 ```
 
 Also created when you run the tools, and not source:
@@ -183,9 +198,10 @@ Engine and session live in `backend/app/database.py`.
 - `SessionLocal` is a session factory. `get_db()` opens a session, yields it to the route, and always closes it.
 - `Base` is the SQLAlchemy declarative base. Every model inherits from it.
 - `init_db()` runs once at startup from `main.py`’s lifespan:
-  1. `Base.metadata.create_all` creates missing tables. It does **not** alter tables that already exist. Adding a column later does not migrate old databases.
-  2. `seed_users()` inserts `admin` and `reader` if those usernames are absent.
-  3. `seed_books()` inserts any catalog title that is not already in `books`.
+  1. `Base.metadata.create_all` creates missing tables. It does **not** alter columns on tables that already exist.
+  2. `_add_missing_book_columns()` is a small SQLite-only fix: if `books` is missing `genre`, `description`, `year`, or `copies`, it `ALTER TABLE`s them in. Postgres is not given this helper.
+  3. `seed_users()` inserts `admin` and `reader` if those usernames are absent.
+  4. `seed_books()` inserts any catalog title that is not already in `books`. If an old row has no description, it fills genre, year, copies, and the one-line note. It does not overwrite a description you already saved.
 
 `create_all` imports `app.models` so the model classes are registered on `Base` before the tables are created. The import is inside the function to avoid a circular import (`models` imports `Base` from `database`).
 
@@ -217,9 +233,43 @@ SQLite does not enforce foreign keys unless `PRAGMA foreign_keys = ON`. This pro
 | title | string, max 255 | Required. |
 | author | string, max 255 | Required. |
 | isbn | string, max 20 | Optional. |
-| created_at | timestamptz | `server_default=func.now()`. Newest books sort first. |
+| genre | string, max 40 | Shelf. One of fiction, fantasy, history, memoir, science. Default `fiction`. |
+| description | string, max 400 | Optional one-line note. |
+| year | integer | Optional publication year. |
+| copies | integer | How many physical copies. Default 1. Minimum 1 in the API. |
+| created_at | timestamptz | `server_default=func.now()`. “Newest” sort uses this. |
 
-Books are not owned by a user. There is no `user_id` on `books`. The catalog is shared.
+Books are not owned by a user. There is no `user_id` on `books`. Who has a copy out lives in `loans`.
+
+### Table `loans`
+
+One row is one copy that someone took.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID | Primary key. |
+| book_id | UUID | Which title. Indexed. |
+| user_id | UUID | Who borrowed it. Indexed. |
+| borrowed_at | timestamptz | Set in Python when they borrow. |
+| due_at | timestamptz | `borrowed_at` plus 14 days. The 14 is `LOAN_DAYS` in `lending.py`. |
+| returned_at | timestamptz, null | Null means the copy is still out. That is how “available” is counted. |
+
+A person cannot have two open loans for the same title. Available copies are `copies` minus rows for that book where `returned_at` is null. A loan is late when `due_at` is in the past and `returned_at` is still null. Late is calculated when you read the loan, not stored as its own column.
+
+The borrower or an admin can return it. Returning sets `returned_at` to now.
+
+### Table `saved_books`
+
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID | Primary key. |
+| user_id | UUID | Indexed. |
+| book_id | UUID | Indexed. |
+| created_at | timestamptz | When they saved it. |
+
+Unique on `(user_id, book_id)`. Saving does not change `available`.
+
+Deleting a book also deletes its loan rows and saved rows in the delete route. SQLite will not do that from the foreign key alone, so `delete_book` deletes those rows first.
 
 `models.py` imports `relationship` and does not use it. There is no SQLAlchemy `relationship()` between users and tokens or users and books. The link is only the foreign-key column.
 
@@ -235,7 +285,9 @@ From `backend/`:
 
 ```bash
 sqlite3 bms.db "SELECT username, role FROM users;"
-sqlite3 bms.db "SELECT title, author, isbn FROM books ORDER BY created_at DESC;"
+sqlite3 bms.db "SELECT title, genre, copies FROM books ORDER BY created_at DESC;"
+sqlite3 bms.db "SELECT book_id, user_id, due_at, returned_at FROM loans;"
+sqlite3 bms.db "SELECT user_id, book_id FROM saved_books;"
 sqlite3 bms.db "SELECT token, user_id, expires_at FROM refresh_tokens;"
 ```
 
@@ -256,7 +308,7 @@ sqlite3 bms.db "SELECT token, user_id, expires_at FROM refresh_tokens;"
 | bcrypt==4.2.0 | Password hashing. |
 | psycopg2-binary==2.9.10 | Postgres driver. Unused while `DATABASE_URL` is SQLite. |
 
-There is no Alembic. Schema changes are `create_all` only.
+There is no Alembic. New tables come from `create_all`. The extra book columns on an old SQLite file come from `_add_missing_book_columns()`.
 
 ### `backend/.env.example`
 
@@ -321,10 +373,12 @@ Pydantic models. FastAPI uses them to validate JSON and to document `/docs`.
 | `UserLogin` | `POST /auth/login` | username and password, no length rules. |
 | `TokenResponse` | login, register, refresh responses | `access_token`, `refresh_token`, `token_type` default `"bearer"`, `role`. |
 | `RefreshRequest` | `POST /auth/refresh` | `refresh_token` string. |
-| `BookCreate` | `POST /books` | title and author 1–255, isbn optional, max 20. |
-| `BookUpdate` | `PUT /books/{id}` | same fields as create. All three are required in the body (isbn may be null). This is not a partial PATCH. |
-| `BookOut` | one book in a response | id, title, author, isbn, created_at. `from_attributes=True` lets Pydantic read a SQLAlchemy object. |
+| `BookCreate` / `BookUpdate` | `POST` and `PUT /books` | Both use `BookWrite`: title, author, optional isbn, genre, optional description, optional year, copies (1–20). Not a partial PATCH. Genre must be one of `SHELVES` or the route returns 400 `unknown shelf`. |
+| `BookOut` | one book in a response | The columns above, plus `available` (copies still in), `saved` (this user saved it), and `my_loan` (`id`, `due_at`, `late`) or null. |
 | `BookPage` | `GET /books` | `items: BookOut[]`, `next_cursor: string or null`. |
+| `BorrowRequest` | `POST /loans` | `book_id`. |
+| `LoanOut` | loan responses | id, book_id, title, author, optional username, borrowed_at, due_at, late. |
+| `MyLoan` | nested in `BookOut` | id, due_at, late. |
 
 Validation failures are HTTP 422 with a `detail` array. The UI mostly looks for `detail` as a string, so a 422 often shows the generic fallback message.
 
@@ -334,7 +388,7 @@ Validation failures are HTTP 422 with a `detail` array. The UI mostly looks for 
 - `FastAPI(title="Book Management System")` is the object Uvicorn loads as `app.main:app`.
 - Middleware order is documented in section 2.
 - CORS allows every origin, method, and header (`*`). That is acceptable for a local demo. It is open if this process is ever exposed publicly.
-- Routers: `auth.router`, then `books.router`.
+- Routers: `auth`, `books`, `loans`, `saved`.
 - `GET /health` returns `{"status": "ok"}` and is public.
 
 ### `backend/app/middleware/__init__.py`
@@ -406,9 +460,9 @@ Router prefix `/books`. `MAX_LIMIT = 50`.
 
 **Cursor helpers**
 
-`_encode_cursor(created_at, book_id)` JSON-encodes `{"t": "<iso timestamp>", "id": "<uuid>"}` and base64-url-encodes it. The client treats it as an opaque string.
+`_encode_cursor(sort, key, book_id)` JSON-encodes `{"s": "<sort>", "k": "<sort value>", "id": "<uuid>"}` and base64-url-encodes it. For `newest`, `k` is the ISO timestamp. For `title` or `author`, `k` is that string. The client treats it as an opaque string.
 
-`_decode_cursor` reverses that. Bad input is **400** `invalid cursor`.
+`_decode_cursor` reverses that. Bad input is **400** `invalid cursor`. If `s` in the cursor is not the `sort` on this request, **400** `cursor does not match sort`. Changing sort on the screen starts again at the first page, so it never sends the old cursor.
 
 **`GET /books`** — query params:
 
@@ -417,35 +471,66 @@ Router prefix `/books`. `MAX_LIMIT = 50`.
 | `limit` | 10 | integer 1–50. The UI sends 8. |
 | `cursor` | none | opaque string from a previous `next_cursor`. |
 | `q` | none | search string, max 100 characters. |
+| `genre` | none | one shelf, or omit for every shelf. Unknown value is 400. |
+| `sort` | `newest` | `newest`, `title`, or `author`. Unknown value is 400. |
 
-Search: if `q` is set, `title ILIKE %q%` OR `author ILIKE %q%`. ISBN is not searched. The user’s text is not escaped, so a literal `%` or `_` in the query acts as a SQL LIKE wildcard.
+Search: if `q` is set, `title ILIKE %q%` OR `author ILIKE %q%`. ISBN is not searched. Genre is an extra AND filter. The user’s text is not escaped, so a literal `%` or `_` in the query acts as a SQL LIKE wildcard.
 
-Order: `created_at DESC`, then `id DESC`. The id tie-break makes the order stable when two books share a timestamp.
+Order:
 
-If a cursor is present, keep rows strictly “after” that position in this ordering:
-
-```
-created_at < cursor_time
-OR (created_at == cursor_time AND id < cursor_id)
-```
+- `newest`: `created_at DESC`, then `id DESC`. The next page is rows older than the cursor, or the same time with a smaller id.
+- `title`: `title ASC`, then `id ASC`. The next page is titles after the cursor, or the same title with a larger id.
+- `author`: same idea with `author`.
 
 The query asks for `limit + 1` rows. If that extra row exists, there is another page. `next_cursor` is built from the last row **actually returned** (index `limit - 1`), and the extra row is dropped. If there is no extra row, `next_cursor` is null. This avoids a `COUNT(*)`.
 
-Why a cursor instead of `OFFSET`: offset skips rows by count. If someone inserts a book at the top while you are paging, offset can skip or repeat a row. A cursor says “give me what comes after this exact book”, so inserts at the top do not shift the next page.
+Why a cursor instead of `OFFSET`: offset skips rows by count. If someone inserts a book while you are paging, offset can skip or repeat a row. A cursor says “give me what comes after this exact book”.
 
-**`GET /books/{book_id}`** — one book, or 404 `book not found`. The UI never calls this. It exists so CRUD is complete.
+Each book in the page is passed through `annotate_books` in `lending.py`, which adds `available`, `saved`, and `my_loan` for the caller.
+
+**`GET /books/{book_id}`** — one book, or 404 `book not found`. `BookScreen` calls this.
 
 **`POST /books`** — 201, body `BookCreate`. Admin only, enforced by middleware, not by this function.
 
-**`PUT /books/{book_id}`** — replaces title, author, and isbn. 404 if missing. Admin only.
+**`PUT /books/{book_id}`** — replaces the writable fields. 404 if missing. 400 if the new `copies` is lower than the number of open loans. Admin only.
 
-**`DELETE /books/{book_id}`** — 204 empty body. 404 if missing. Admin only.
+**`DELETE /books/{book_id}`** — 204 empty body. 404 if missing. Also deletes that book’s loans and saves. Admin only.
+
+### `backend/app/lending.py`
+
+Shared loan math so the book routes and the loan routes do not each invent a due date.
+
+- `LOAN_DAYS = 14`
+- `due_on(start)` adds those 14 days
+- `is_late(due_at)` compares with now. SQLite sometimes returns a datetime with no timezone; `as_utc` treats that as UTC
+- `annotate_books` counts open loans per book, finds this user’s open loan, and finds which of these books they saved
+
+### `backend/app/routers/loans.py`
+
+All of these need a bearer token. Swagger shows the lock because the router depends on `HTTPBearer`, same as books.
+
+| Method | Path | Who | What |
+|---|---|---|---|
+| GET | `/loans/mine` | any logged-in user | their open loans, soonest due date first |
+| GET | `/loans` | admin | every open loan, with `username` |
+| POST | `/loans` | any logged-in user | body `{ "book_id" }`. 404 unknown book. 400 if they already have it out, or if `available` is 0. 201 and a `LoanOut` |
+| POST | `/loans/{id}/return` | the borrower or an admin | sets `returned_at`. 404 if missing or already returned. 403 `not your loan` otherwise |
+
+A reader who calls `GET /loans` gets 403 from this file, not from the RBAC middleware. The middleware only special-cases `/books` writes.
+
+### `backend/app/routers/saved.py`
+
+| Method | Path | What |
+|---|---|---|
+| GET | `/saved` | this user’s saved books, newest save first, as `BookOut` list |
+| POST | `/saved/{book_id}` | save it. If it is already saved, the row is left as it is and the book is returned. 404 if the book does not exist |
+| DELETE | `/saved/{book_id}` | 204. Missing row is still 204 |
 
 ---
 
 ## 7. Frontend, file by file
 
-The UI is React Native components (`View`, `Text`, `Pressable`, `TextInput`, `FlatList`). On web, React Native Web turns those into DOM nodes. There is no React Navigation and no Expo Router. `App.tsx` picks a screen with a boolean.
+The UI is React Native components (`View`, `Text`, `Pressable`, `TextInput`, `FlatList`). On web, React Native Web turns those into DOM nodes. There is no React Navigation and no Expo Router. `App.tsx` picks login versus the library, then catalog, book, loans, or saved.
 
 ### `frontend/package.json`
 
@@ -485,7 +570,7 @@ Calls `registerRootComponent(App)`. That is Expo’s way of registering the root
 
 State `authed` starts as `true` if `getAccessToken()` returns a string. On web that reads `sessionStorage`. Refreshing the browser tab keeps you logged in. Closing the tab clears `sessionStorage`, so you are logged out. (sessionStorage is per tab, and it dies with the tab. It is not `localStorage`.)
 
-If `authed` is false, render `LoginScreen`. On success, set `authed` true. If true, render `HomeScreen`. Logout sets `authed` false. The root view uses the warm background color so the page is not white at the edges.
+If `authed` is false, render `LoginScreen`. On success, set `authed` true. If true, `page` is `catalog`, `loans`, `saved`, or `book`. Logout clears that back to the catalog and shows login. The root view uses the warm background color so the page is not white at the edges.
 
 There is no router, no deep link, and no URL path per screen. Both screens are the same web URL.
 
@@ -503,33 +588,33 @@ Shared look. Screens should not invent one-off hex colors when a token exists.
 
 | Token | Value | Used for |
 |---|---|---|
-| `bg` | `#E6E0D4` | page background |
-| `paper` | `#F7F4EE` | cards |
-| `ink` | `#1A1814` | main text |
-| `muted` | `#6F675C` | secondary text |
-| `line` | `#E3DCD0` | borders |
-| `forest` | `#1B332C` | buttons, login panel |
-| `forestMid` | `#2A4A40` | reader note text, edit link |
-| `gold` | `#A68445` | small accents, isbn line |
-| `goldSoft` | `#F3E7CF` | librarian pill |
-| `sage` | `#E4EFE7` | reader pill and reader note |
-| `danger` | `#8E3A2F` | remove, errors |
-| `dangerSoft` | `#F8E7E3` | error background |
-| `cream` | `#F3EEE4` | text on the dark green panel |
+| `bg` | `#F3F4F6` | page background |
+| `paper` | `#FFFFFF` | the sheet the catalog sits on |
+| `ink` | `#111111` | main text, buttons, the login panel |
+| `muted` | `#5F6670` | secondary text |
+| `line` | `#D5D8DE` | borders |
+| `forest` | `#111111` | buttons and the login panel. The name is old. The color is black. |
+| `forestMid` | `#2A2E35` | edit link, stock line |
+| `gold` | `#D61F26` | the red mark: active tab, shelf line, cover stripe |
+| `goldSoft` | `#111111` | kept so older styles still resolve |
+| `sage` | `#EEF0F3` | reader note |
+| `danger` | `#D61F26` | remove, errors |
+| `dangerSoft` | `#FDECEC` | error background |
+| `cream` | `#FFFFFF` | text on a black button or the black login panel |
 
-`spacing` is 6, 10, 16, 24, 36. `radius` is 10, 16, 28.
+`spacing` is 6, 10, 16, 24, 36. `radius` is 0. Corners are square.
 
-`serif` is Georgia (and Palatino on web). `sans` is the system UI font on web, and the default React Native font on a phone.
+`serif` and `sans` are both the system UI font. `serif` still exists so older style objects compile. It no longer loads Georgia.
 
 `fieldReset` removes the browser’s blue focus outline on web inputs. Focus is shown by our own border instead.
 
-`cardShadow` and `liftShadow` use CSS `boxShadow` on web (React Native Web warns on the old `shadow*` props) and the native shadow props on iOS/Android.
+`cardShadow` and `liftShadow` are empty. The screens use borders instead of drop shadows.
 
 ### `frontend/src/types/book.ts`
 
-`Book` matches `BookOut`: `id`, `title`, `author`, `isbn` (string or null), `created_at` (ISO string).
+`Book` matches `BookOut`: the catalog fields, plus `available`, `saved`, and `my_loan`. `shelves` is the same five names as `SHELVES` on the server. `SortKey` is `newest`, `title`, or `author`.
 
-`BookPage` is `items` plus `next_cursor`.
+`BookPage` is `items` plus `next_cursor`. `Loan` in `types/loan.ts` matches `LoanOut`.
 
 UUIDs and datetimes arrive as JSON strings. TypeScript types them as `string`, not as a `Date`.
 
@@ -582,12 +667,19 @@ Login and register do not go through `apiFetch`. They are public and must work w
 
 | Function | HTTP | Fallback error |
 |---|---|---|
-| `fetchBookPage({ limit, cursor, q })` | GET `/books?...` | failed to load books |
-| `createBook({ title, author, isbn })` | POST `/books` | failed to add book |
+| `fetchBookPage({ limit, cursor, q, genre, sort })` | GET `/books?...` | failed to load books |
+| `fetchBook(id)` | GET `/books/{id}` | book not found |
+| `createBook(payload)` | POST `/books` | failed to add book |
 | `updateBook(id, payload)` | PUT `/books/{id}` | failed to update book |
 | `deleteBook(id)` | DELETE `/books/{id}` | failed to delete book |
 
-`fetchBookPage` always sends `limit` (default 10 if the caller omits it). The screen passes 8. It adds `cursor` only when present, and `q` only when the trimmed query is non-empty.
+`fetchBookPage` always sends `limit` (default 10 if the caller omits it) and `sort` (default `newest`). The screen passes 8. It adds `cursor` only when present, `q` only when the trimmed query is non-empty, and `genre` only when a shelf is selected.
+
+`loans.ts`: `fetchMyLoans`, `fetchAllLoans`, `borrowBook`, `returnLoan`.
+
+`saved.ts`: `fetchSaved`, `saveBook`, `unsaveBook`.
+
+`readBody` lives in `client.ts` and is shared by those three files. 401 still clears the session and throws `"session expired"`.
 
 ### `frontend/src/hooks/useDebouncedValue.ts`
 
@@ -603,7 +695,7 @@ While `search.trim() !== debouncedSearch.trim()`, the screen shows the word “s
 
 ### `frontend/src/components/BookCover.tsx`
 
-A 62×88 colored block. The letter is the first character of the title, uppercased. Empty title falls back to `b`. The color is picked from a fixed palette of 8 dark colors by a small hash of the title (`hash * 33 + charCode`, mod 997, then mod 8). The same title always gets the same color, even if the list order changes. A short cream line sits near the bottom of the cover. These are not downloaded images.
+A 44×58 white square with a black border and a red stripe across the top. The letter is the first character of the title, uppercased. Empty title falls back to `b`. These are not downloaded images.
 
 ### `frontend/src/components/BookRow.tsx`
 
@@ -613,7 +705,13 @@ One catalog card: cover, title (max 2 lines), author (1 line), then isbn and the
 
 `canEdit` false: no buttons. That is the reader view.
 
+The card also shows the shelf, `in` / `out` (or `2 of 3 in` when there is more than one copy), and `due …` plus `late` when `my_loan` is set. Pressing the title calls `onOpen`.
+
 `canEdit` true: “edit” and “remove”. Remove does not delete immediately. The parent sets `confirming` for that book id, and the card swaps to “remove this title? / yes / keep”. Yes calls `onConfirmDelete`. This state lives in `HomeScreen` (`pendingDeleteId`), not inside the row, so a recycled `FlatList` cell cannot keep a confirm state stuck on the wrong book.
+
+### `frontend/src/components/TopBar.tsx`
+
+A full-width white bar with a black bottom rule. Inside it: the wordmark, username, librarian or reader label, sign out, and the tabs. The active tab has a red underline. A reader sees catalog, loans, and saved. A librarian sees catalog and out. “Out” is the same loans screen, labeled as the desk rather than a personal checkout. Sign out calls `clearSession()` and then `onLogout()`. The label still reads `getRole() === "admin"`. The word on screen is the label. The stored role is still `admin` or `user`.
 
 ### `frontend/src/screens/LoginScreen.tsx`
 
@@ -646,24 +744,22 @@ The password field submits on the keyboard’s done key (`onSubmitEditing`).
 
 ### `frontend/src/screens/HomeScreen.tsx`
 
-Props: `onLogout()`.
+Props: `onLogout`, `onOpenBook(id)`, `onTab`.
 
-Reads `getRole()` and `getUsername()` once per render from storage. `canEdit` is `role === "admin"`. The screen mounts fresh after login, so the role is the one just saved.
+Reads `getRole()` from storage. `canEdit` is `role === "admin"`. The screen mounts fresh after login, so the role is the one just saved.
 
-The column is centered and `maxWidth` 760, on the same warm page background. Wide monitors show empty background on the sides.
+The column is centered and `maxWidth` 760, on a white sheet. Wide monitors show gray around it. Search sits under the bar.
 
 **Header (stays put while the list scrolls)**
 
-- Wordmark “bookstack”, username under it.
-- Pill: “librarian” (gold) or “reader” (sage). These words are display labels. The stored role is still `admin` or `user`.
-- “sign out” calls `clearSession()` then `onLogout()`.
-- Search field. Focus turns the border forest green. “clear” appears when the field is non-empty.
+- `TopBar` with the catalog tab selected.
+- Search field. Focus turns the border black. “clear” appears when the field is non-empty.
 - A one-line status that says “searching…” during the debounce wait, and a blank line otherwise, so the layout does not jump.
 
 **List header (scrolls away)**
 
 - Admin, desk closed: a full-width “add a title” button.
-- Admin, desk open: a form with title, author, optional isbn, cancel, and save. Save is disabled until title and author are non-empty. Button text is “add to catalog” or “save changes”.
+- Admin, desk open: a form with title, author, isbn, shelf, year, copies, a short note, cancel, and save. Save stays disabled until title and author are non-empty. Copies must be an integer of at least 1. Year, if filled in, must be an integer of at least 1000. Button text is “add to catalog” or “save changes”.
 - Reader: a sage note. No add button, no edit, no remove.
 - Section title “catalog”, or “matches” when the debounced query is non-empty. The right side says `showing N`, which is how many are loaded, not how many exist in the database.
 
@@ -678,6 +774,8 @@ A `useEffect` calls `loadFirstPage(debouncedSearch)` whenever the debounced quer
 Errors go through `fail`. If the message is `"session expired"`, it calls `onLogout()` instead of showing a banner.
 
 Pull to refresh calls `loadFirstPage` again.
+
+Above the list, shelf chips (`all` plus the five shelves) and a sort row (`newest`, `title`, `author`). Changing either reloads the first page, because `loadFirstPage` depends on `shelf` and `sort`.
 
 **Show more**
 
@@ -697,6 +795,32 @@ Trims title and author. ISBN is trimmed, and an empty string is sent as `null`. 
 
 First load with no rows yet: a spinner and “opening the catalog…”. After that, an empty result says “nothing on this shelf”, with different copy when a search is active.
 
+### `frontend/src/screens/BookScreen.tsx`
+
+Opened from a catalog card or a loan or a saved title. `App` stores `bookId` and sets `page` to `"book"`.
+
+`GET /books/{id}` fills the page. For a reader:
+
+- borrow, if you do not already have it and `available` is above 0. Calls `POST /loans`.
+- return, if `my_loan` is set. Calls `POST /loans/{id}/return`.
+- save / remove from reading list. `POST` or `DELETE /saved/{book_id}`.
+
+A librarian does not get borrow or save on this page. The note points them at the out tab. The `POST /loans` route still accepts an admin token. The screen just does not offer it.
+
+After any of those, it loads the book again so the stock line and the due date match the database. “back to the catalog” calls `onBack`.
+
+### `frontend/src/screens/LoansScreen.tsx`
+
+Admin calls `GET /loans` and the heading is “out on loan”. Each row includes the username. Reader calls `GET /loans/mine` and the heading is “my loans”. Either person can press return on a row they are allowed to return. The copy on the page says a loan is due in 14 days.
+
+### `frontend/src/screens/SavedScreen.tsx`
+
+`GET /saved`. Opening a title goes to `BookScreen`. Remove calls `DELETE /saved/{id}` and drops that row from the list. The note says saving is not the same as borrowing.
+
+### `frontend/src/format.ts`
+
+`shortDate` turns an ISO string into a short local date for due dates on the cards and the book page.
+
 ---
 
 ## 8. API cheat sheet
@@ -712,8 +836,15 @@ Base URL `http://127.0.0.1:8000`.
 | GET | `/books` | bearer | any logged-in role | 200 `{items, next_cursor}` | 401 |
 | GET | `/books/{id}` | bearer | any logged-in role | 200 book | 404, 401 |
 | POST | `/books` | bearer | admin | 201 book | 403 reader, 401, 422 |
-| PUT | `/books/{id}` | bearer | admin | 200 book | 403, 404, 401, 422 |
+| PUT | `/books/{id}` | bearer | admin | 200 book | 403, 404, 400 if copies are below open loans, 401, 422 |
 | DELETE | `/books/{id}` | bearer | admin | 204 empty | 403, 404, 401 |
+| GET | `/loans/mine` | bearer | any logged-in role | 200 loan list | 401 |
+| GET | `/loans` | bearer | admin | 200 every open loan, with username | 403 reader, 401 |
+| POST | `/loans` | bearer | any logged-in role | 201 loan | 400 already borrowed or none in, 404 |
+| POST | `/loans/{id}/return` | bearer | borrower or admin | 200 loan | 403 not your loan, 404 |
+| GET | `/saved` | bearer | any logged-in role | 200 book list | 401 |
+| POST | `/saved/{book_id}` | bearer | any logged-in role | 200 book | 404 |
+| DELETE | `/saved/{book_id}` | bearer | any logged-in role | 204 | 401 |
 
 Login body:
 
@@ -735,7 +866,15 @@ Login response:
 Create body:
 
 ```json
-{ "title": "Circe", "author": "Madeline Miller", "isbn": "9780316556347" }
+{
+  "title": "Circe",
+  "author": "Madeline Miller",
+  "isbn": "9780316556347",
+  "genre": "fantasy",
+  "description": "a witch tells her own story",
+  "year": 2018,
+  "copies": 1
+}
 ```
 
 List response shape:
@@ -748,14 +887,21 @@ List response shape:
       "title": "Pachinko",
       "author": "Min Jin Lee",
       "isbn": "9781455563937",
+      "genre": "history",
+      "description": "a family across generations",
+      "year": 2017,
+      "copies": 1,
+      "available": 1,
+      "saved": false,
+      "my_loan": null,
       "created_at": "2026-10-23T..."
     }
   ],
-  "next_cursor": "eyJ0IjoiLi4uIiwiaWQiOiIuLi4ifQ"
+  "next_cursor": "eyJzIjoibmV3ZXN0Iiwia..."
 }
 ```
 
-`next_cursor` is base64. Decoded it is JSON `{"t":"<iso time>","id":"<uuid>"}`.
+`next_cursor` is base64. Decoded it is JSON `{"s":"newest","k":"<iso time or title or author>","id":"<uuid>"}`. `my_loan`, when set, is `{ "id", "due_at", "late" }`.
 
 Authorized call:
 
@@ -764,7 +910,9 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-Swagger at `/docs` lists the same routes and can send them. You paste the access token in the Authorize box as `Bearer <token>` if the UI asks for a bearer value. The middleware wants the header itself to start with `Bearer `.
+Swagger is at http://127.0.0.1:8000/docs. ReDoc is at http://127.0.0.1:8000/redoc. Both are public.
+
+Book routes declare `HTTPBearer` so the docs page shows **Authorize**. Paste `access_token` only. Swagger adds the word `Bearer` itself. The token is remembered in that browser (`persistAuthorization`). Auth routes stay open, so you can log in before you authorize. The middleware still does the real check. The `HTTPBearer` dependency is there so the docs know about the header.
 
 ---
 
@@ -773,10 +921,12 @@ Swagger at `/docs` lists the same routes and can send them. You paste the access
 | | Librarian (`admin`) | Reader (`user`) |
 |---|---|---|
 | How you get the account | seeded `admin`, or you cannot self-register into this role | seeded `reader`, or the register tab |
-| Pill on the home screen | librarian | reader |
-| Search | yes, debounced | yes, debounced |
-| Show more | yes | yes |
+| Pill | librarian | reader |
+| Search, shelves, sort, show more | yes | yes |
 | Add / edit / delete | yes | no controls, and the API returns 403 if they try anyway |
+| Borrow and save on a title | no. the page points at the out tab | yes |
+| Loans tab | labeled “out”: every open loan, with the username, and return | “my loans”, their own only |
+| Saved tab | not shown | their own reading list |
 | Session keys | same four keys, `bms_role=admin` | `bms_role=user` |
 
 The word “librarian” never goes to the API. The middleware compares against `"admin"`.
@@ -793,11 +943,10 @@ Say these plainly if you are asked. Guessing that they exist will not match the 
 - No test suite.
 - No logout endpoint and no refresh-token rotation.
 - No password reset, email, or profile screen.
-- No book ownership, loans, copies, or genres.
-- No “get one book” button. The route exists. The UI does not call it.
+- No book ownership. A loan is a checkout, not a private copy of the catalog row.
 - No infinite scroll. Paging is the “show more” button.
-- No React Router / Expo Router. One boolean in `App.tsx`.
-- No global state library (no Redux, no Zustand). State sits in the two screens.
+- No React Router / Expo Router. `App.tsx` switches screens with `page`.
+- No global state library (no Redux, no Zustand). State sits in each screen.
 - The access token’s role is not re-read from the database on every request.
 - CORS is `*`.
 - The JWT secret in `config.py` is a development default.
@@ -823,7 +972,7 @@ Nowhere in plaintext. `users.password_hash` is a bcrypt hash. Login uses `bcrypt
 They can send the request. They get 403. The UI also hides the controls.
 
 **What is cursor pagination?**  
-`GET /books` orders by `created_at` desc, `id` desc, and returns `limit` rows plus a `next_cursor` that points at the last row of this page. The next request says “rows that sort after this timestamp and id”. The handler fetches `limit + 1` rows to know whether another page exists. The UI uses `limit=8` and a “show more” button. The API default if you omit `limit` is 10. The maximum is 50.
+`GET /books` returns `limit` rows plus a `next_cursor` that points at the last row of this page, including which sort was used. Newest order is `created_at` desc, `id` desc. Title and author are ascending, with `id` as the tie-break. The handler fetches `limit + 1` rows to know whether another page exists. A cursor from one sort is rejected if you send it with another sort. The UI uses `limit=8` and a “show more” button. The API default if you omit `limit` is 10. The maximum is 50.
 
 **What does debounce mean here?**  
 `search` updates on every keystroke. `debouncedSearch` updates 400 ms after the user stops. The `useEffect` that calls the API depends on `debouncedSearch`, not on `search`.
@@ -832,10 +981,10 @@ They can send the request. They get 403. The UI also hides the controls.
 On web only: `bms_access_token`, `bms_refresh_token`, `bms_role`, `bms_username`. It is `sessionStorage`, so it lasts for the tab, not forever. Native uses a `Map` in memory instead.
 
 **What happens when the access token expires?**  
-The next book call gets 401. `apiFetch` posts the refresh token to `/auth/refresh`, saves the new access token, and retries once. If that fails, `books.ts` clears the session and the screen treats `"session expired"` as a logout.
+The next API call gets 401. `apiFetch` posts the refresh token to `/auth/refresh`, saves the new access token, and retries once. If that fails, `readBody` clears the session and the screen treats `"session expired"` as a logout.
 
-**Why does the home screen say librarian if the database says admin?**  
-Display label versus stored role. `canEdit` checks `role === "admin"`. The pill text is chosen in `HomeScreen` from that boolean.
+**Why does the screen say librarian if the database says admin?**  
+Display label versus stored role. `canEdit` checks `role === "admin"`. The pill text is chosen in `TopBar` from `getRole()`.
 
 **Why might two books with the same timestamp still page correctly?**  
 The sort and the cursor both include `id` as a tie-break.
@@ -847,7 +996,22 @@ No. Only `title` and `author`.
 No. It is `backend/bms.db`. SQLAlchemy will talk to Postgres if `DATABASE_URL` is a `postgresql://` URL, because `psycopg2` is installed. Nothing in this project creates an RDS instance.
 
 **What does `create_all` not do?**  
-It does not change an existing table. If you add a column to a model, an old `bms.db` keeps the old shape until you delete the file or migrate it.
+It does not change columns on a table that already exists. This project’s extra step is `_add_missing_book_columns()` in `database.py`, and it only adds `genre`, `description`, `year`, and `copies` on SQLite. A new table such as `loans` is created by `create_all` because the table was missing.
+
+**How many copies can one person take?**  
+One open loan per person per title, even when `copies` is greater than 1. The other copies stay for other people. Available is `copies` minus open loans.
+
+**When is a loan late?**  
+`due_at` is 14 days after `borrowed_at`. `is_late` in `lending.py` is true when that time has passed and `returned_at` is still null. Nothing in the app charges a fine.
+
+**Does saving a book take a copy?**  
+No. `saved_books` is only a list. Borrow is `POST /loans`.
+
+**Who can return a loan?**  
+The person who borrowed it, or an admin. A reader who returns someone else’s id gets 403 `not your loan`.
+
+**Where is “see all loans” blocked?**  
+Inside `GET /loans` in `loans.py`, not in `RBACMiddleware`. The middleware only blocks non-admin writes under `/books`.
 
 **Are there tests?**  
 No.
@@ -860,9 +1024,12 @@ No.
 2. **UI.** Tap the librarian card, then sign in. The catalog and “add a title” are the admin UI.
 3. **Session storage.** Application → Session Storage. Four `bms_` keys. `bms_role` is `admin`.
 4. **Network and API.** Search `austen`. After a short pause, one `GET /books?limit=8&q=austen`. That pause is the debounce. Open the response: `items` and `next_cursor`.
-5. Clear the search. Press **show more**. The next `GET /books` includes a `cursor` query param. That is cursor pagination.
-6. **CRUD.** Add a title. Network shows `POST /books` and 201. Edit it (`PUT`). Remove it (`DELETE`, status 204).
+5. Clear the search. Press a shelf, then **title** or **author**. The next `GET /books` includes `genre` and `sort`. Press **show more**. That request includes a `cursor`. That is cursor pagination.
+6. **CRUD.** Add a title, with a shelf and a copy count. Network shows `POST /books` and 201. Edit it (`PUT`). Remove it (`DELETE`, status 204).
 7. **Database.** `sqlite3 backend/bms.db` and select from `users` and `books`. The new book is a row. Passwords are hashes.
 8. Sign out. Sign in as `reader` / `reader123`. The note replaces the form. No edit or remove. `bms_role` is `user`.
-9. **RBAC.** In `/docs` or with curl, send `POST /books` with the reader’s access token. The body is `{"detail":"admin role required"}` and the status is 403.
-10. **Register.** On the login screen, switch to register, create a new username. That row appears in `users` with role `user`, and you land on the reader screen.
+9. Open a title. **Borrow** it. Network shows `POST /loans`. The loans tab lists it with a due date. `sqlite3` on `loans` shows `returned_at` null. Return it. That column is filled in.
+10. Save a title, open the saved tab, then remove it. That is `saved_books`, separate from `loans`.
+11. Sign back in as admin and open loans. You see who has each copy. `GET /loans` as the reader is 403.
+12. **RBAC.** In `/docs` or with curl, send `POST /books` with the reader’s access token. The body is `{"detail":"admin role required"}` and the status is 403.
+13. **Register.** On the login screen, switch to register, create a new username. That row appears in `users` with role `user`, and you land on the reader screen.

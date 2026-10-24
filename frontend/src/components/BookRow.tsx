@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { cardShadow, colors, sans, serif } from "../theme";
+import { shortDate } from "../format";
+import { colors, sans } from "../theme";
 import type { Book } from "../types/book";
 import BookCover from "./BookCover";
 
@@ -8,45 +9,58 @@ type Props = {
   book: Book;
   canEdit: boolean;
   confirming: boolean;
+  onOpen: (book: Book) => void;
   onEdit: (book: Book) => void;
   onAskDelete: (book: Book) => void;
   onConfirmDelete: (book: Book) => void;
   onCancelDelete: () => void;
 };
 
-function addedOn(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
+function stockLabel(book: Book) {
+  if (book.available <= 0) {
+    return "out";
   }
-  return date
-    .toLocaleDateString(undefined, { day: "numeric", month: "short" })
-    .toLowerCase();
+  if (book.copies > 1) {
+    return `${book.available} of ${book.copies} in`;
+  }
+  return "in";
 }
 
 export default function BookRow({
   book,
   canEdit,
   confirming,
+  onOpen,
   onEdit,
   onAskDelete,
   onConfirmDelete,
   onCancelDelete,
 }: Props) {
-  const when = addedOn(book.created_at);
-  const meta = [book.isbn, when].filter(Boolean).join("   ·   ");
+  const when = shortDate(book.created_at);
+  const due = book.my_loan ? shortDate(book.my_loan.due_at) : "";
+  const stock = stockLabel(book);
 
   return (
     <View style={styles.card}>
       <BookCover title={book.title} />
       <View style={styles.body}>
-        <Text style={styles.title} numberOfLines={2}>
-          {book.title}
-        </Text>
-        <Text style={styles.author} numberOfLines={1}>
-          {book.author}
-        </Text>
-        {meta ? <Text style={styles.meta}>{meta}</Text> : null}
+        <Pressable onPress={() => onOpen(book)}>
+          <Text style={styles.title} numberOfLines={2}>
+            {book.title}
+          </Text>
+          <Text style={styles.author} numberOfLines={1}>
+            {book.author}
+          </Text>
+          <Text style={styles.meta}>
+            {book.genre}
+            {when ? `   ·   ${when}` : ""}
+          </Text>
+          <Text style={[styles.stock, book.available <= 0 && styles.stockOut]}>
+            {stock}
+            {due ? `   ·   due ${due}` : ""}
+            {book.my_loan?.late ? "   ·   late" : ""}
+          </Text>
+        </Pressable>
         {canEdit ? (
           confirming ? (
             <View style={styles.actions}>
@@ -78,24 +92,22 @@ const styles = StyleSheet.create({
   card: {
     flex: 1,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     backgroundColor: colors.paper,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    marginBottom: 12,
-    ...cardShadow,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    paddingVertical: 16,
+    paddingHorizontal: 4,
   },
   body: {
     flex: 1,
     minWidth: 0,
   },
   title: {
-    ...serif,
-    fontSize: 18,
-    lineHeight: 22,
+    ...sans,
+    fontSize: 16,
+    lineHeight: 21,
+    fontWeight: "700",
     color: colors.ink,
   },
   author: {
@@ -110,6 +122,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     letterSpacing: 0.3,
     color: colors.gold,
+  },
+  stock: {
+    ...sans,
+    marginTop: 4,
+    fontSize: 12,
+    color: colors.forestMid,
+  },
+  stockOut: {
+    color: colors.danger,
   },
   actions: {
     flexDirection: "row",

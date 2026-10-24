@@ -17,7 +17,12 @@ from app.security import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=TokenResponse, status_code=201)
+@router.post(
+    "/register",
+    response_model=TokenResponse,
+    status_code=201,
+    summary="create a reader account",
+)
 def register(payload: UserRegister, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="username taken")
@@ -33,7 +38,7 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
     return _issue_tokens(db, user)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, summary="log in")
 def login(payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
     if not user or not verify_password(payload.password, user.password_hash):
@@ -41,7 +46,11 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     return _issue_tokens(db, user)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="exchange a refresh token for a new access token",
+)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     record = (
         db.query(RefreshToken)

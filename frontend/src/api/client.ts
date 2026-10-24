@@ -1,5 +1,28 @@
 import { API_URL } from "../config";
-import { getAccessToken, getRefreshToken, setAccessToken } from "../storage/session";
+import { clearSession, getAccessToken, getRefreshToken, setAccessToken } from "../storage/session";
+
+export async function readBody<T>(res: Response, fallback: string): Promise<T> {
+  if (res.status === 401) {
+    clearSession();
+    throw new Error("session expired");
+  }
+  if (!res.ok) {
+    let detail = fallback;
+    try {
+      const data = await res.json();
+      if (typeof data?.detail === "string") {
+        detail = data.detail;
+      }
+    } catch {
+      detail = fallback;
+    }
+    throw new Error(detail);
+  }
+  if (res.status === 204) {
+    return undefined as T;
+  }
+  return res.json();
+}
 
 async function refreshAccessToken(): Promise<boolean> {
   const refreshToken = getRefreshToken();
